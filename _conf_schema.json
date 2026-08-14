@@ -1,0 +1,22 @@
+{
+  "game_timeout_seconds": {
+    "description": "每轮游戏的超时时间（秒），超时后由后台任务自动结束该游戏",
+    "type": "int",
+    "default": 120
+  },
+  "sweep_interval_seconds": {
+    "description": "后台清扫过期游戏的执行间隔（秒）",
+    "type": "int",
+    "default": 30
+  },
+  "guess_max": {
+    "description": "猜数字的范围最大值（即 1-guess_max 之间随机）",
+    "type": "int",
+    "default": 100
+  },
+  "allow_repeat_idiom": {
+    "description": "成语接龙是否允许重复使用已出现的成语（false 表示不允许）",
+    "type": "bool",
+    "default": false
+  }
+}

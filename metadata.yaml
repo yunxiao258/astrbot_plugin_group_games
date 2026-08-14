@@ -3,4 +3,5 @@ display_name: 群聊互动小游戏
 desc: 群聊互动小游戏：猜数字/成语接龙/猜歌名
 help: 发送「/游戏」查看玩法列表；「/猜数字」开始猜数字；「/接龙」开始成语接龙；「/猜歌」开始猜歌名
 version: 1.0.0
-author: Administrator
+author: 云晓
+repo: https://github.com/yunxiao258/astrbot_plugin_group_games

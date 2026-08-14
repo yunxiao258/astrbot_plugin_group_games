@@ -16,7 +16,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "astrbot_plugin_group_games"
-PLUGIN_AUTHOR = "Administrator"
+PLUGIN_AUTHOR = "云晓"
 PLUGIN_DESC = "群聊互动小游戏：猜数字/成语接龙/猜歌名"
 PLUGIN_VERSION = "1.0.0"
 

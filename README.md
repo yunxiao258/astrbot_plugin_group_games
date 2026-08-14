@@ -4,7 +4,8 @@
 
 - 插件名称：`astrbot_plugin_group_games`
 - 版本：1.0.0
-- 作者：Administrator
+- 作者：云晓
+- 许可证：MIT（详见 LICENSE）
 
 ## 功能
 

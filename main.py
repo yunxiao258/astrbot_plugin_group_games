@@ -185,7 +185,9 @@ class GroupGamesPlugin(Star):
             self.config.get("sweep_interval_seconds"), 30
         )
         # 接龙是否允许重复使用成语
-        self.allow_repeat_idiom = bool(self.config.get("allow_repeat_idiom", False))
+        self.allow_repeat_idiom = self._safe_bool(
+            self.config.get("allow_repeat_idiom"), False
+        )
         # 猜数字范围最大值
         self.guess_max = self._safe_int(self.config.get("guess_max"), 100)
         # 游戏状态：session key -> {"guess": state|None, "chain": state|None, "song": state|None}
@@ -203,6 +205,22 @@ class GroupGamesPlugin(Star):
             return n if n > 0 else default
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _safe_bool(v, default: bool) -> bool:
+        """防御性布尔解析：字符串 "false"/"0" 等不被误判为 True"""
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            low = v.strip().lower()
+            if low in ("1", "true", "yes", "on"):
+                return True
+            if low in ("0", "false", "no", "off", ""):
+                return False
+            return default
+        if isinstance(v, (int, float)):
+            return bool(v)
+        return default
 
     @staticmethod
     def _rest_of(event: AstrMessageEvent, cmd: str) -> str:
@@ -260,6 +278,7 @@ class GroupGamesPlugin(Star):
         max_num = self._safe_int(max_num, self.guess_max) if max_num else self.guess_max
         sess[KEY_GUESS] = {
             "number": random.randint(1, max_num),
+            "max": max_num,  # 本局范围上限（start_guess 可能指定与全局不同的值）
             "counters": {},  # sender_id -> 尝试次数
             "last_activity": time.time(),
         }
@@ -276,14 +295,15 @@ class GroupGamesPlugin(Star):
         game = sess[KEY_GUESS]
         if not game:
             return "⚠️ 当前没有进行中的猜数字游戏，发送「/猜数字」开始。"
+        max_num = game.get("max") or self.guess_max
         guess = self._safe_int(text, 0)
         if guess <= 0:
             return (
-                f"❓ 请输入 1-{self.guess_max} 之间的数字，"
+                f"❓ 请输入 1-{max_num} 之间的数字，"
                 f"或发送「/猜数字 放弃」结束游戏。"
             )
-        if guess > self.guess_max:
-            return f"❌ 数字超出范围（1-{self.guess_max}），请重新输入。"
+        if guess > max_num:
+            return f"❌ 数字超出范围（1-{max_num}），请重新输入。"
         # 统计该玩家的尝试次数
         counters = game["counters"]
         counters[sender_id] = counters.get(sender_id, 0) + 1

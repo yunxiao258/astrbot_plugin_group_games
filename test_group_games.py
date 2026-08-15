@@ -127,6 +127,38 @@ class TestGuessNumber(unittest.TestCase):
         self.assertIn("请输入", p.do_guess("g2", "u1", "张三", "-5"))
         self.assertIn("超出范围", p.do_guess("g2", "u1", "张三", "101"))
 
+    def test_custom_max_boundary(self):
+        # 自定义范围（/猜数字 1000）：校验必须用本局上限而非全局默认
+        random.seed(11)
+        p = make_plugin(guess_max=100)
+        p.start_guess("c1", max_num=1000)
+        n = self._number(p, "c1")
+        self.assertGreaterEqual(n, 1)
+        self.assertLessEqual(n, 1000)
+        # 100 以内的合法猜测不应被误判超出范围
+        r = p.do_guess("c1", "u1", "张三", "150")
+        self.assertNotIn("超出范围", r)
+        # 超过本局上限才报超出
+        r2 = p.do_guess("c1", "u1", "张三", "1001")
+        self.assertIn("超出范围", r2)
+        # 提示文本中的范围随本局上限
+        r3 = p.do_guess("c1", "u1", "张三", "0")
+        self.assertIn("1-1000", r3)
+
+    def test_custom_max_invalid_falls_back(self):
+        # 非法 max_num 回退全局默认
+        random.seed(3)
+        p = make_plugin(guess_max=50)
+        p.start_guess("c2", max_num="abc")
+        n = self._number(p, "c2")
+        self.assertLessEqual(n, 50)
+        self.assertGreaterEqual(n, 1)
+
+    def test_allow_repeat_dirty_value(self):
+        # 字符串 "false" 不应被误判为允许重复
+        p = make_plugin(allow_repeat_idiom="false")
+        self.assertFalse(p.allow_repeat_idiom)
+
     def test_give_up(self):
         p = make_plugin()
         self.assertIn("没有进行中", p.give_up_guess("g3"))

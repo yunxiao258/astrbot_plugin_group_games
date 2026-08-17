@@ -425,7 +425,12 @@ class GroupGamesPlugin(Star):
         ).lower()
 
     def _song_matches(self, guess: str, title: str) -> bool:
-        """模糊匹配：全等 / 互为子串 / 猜测文本中任一 2 字以上片段命中标题"""
+        """模糊匹配：全等 / 互为子串 / 猜测文本中任一 2 字以上片段命中标题。
+
+        片段命中判定可等价收敛为「任一 2 字片段命中」：若存在长度≥2 的
+        子串命中标题，其首 2 字片段必然也命中；反之 2 字片段本身即为命中
+        片段。因此只需检查全部 bigram，复杂度 O(len·len) 而非 O(len³)。
+        """
         ng, nt = self._normalize_song(guess), self._normalize_song(title)
         if not ng or not nt:
             return False
@@ -435,10 +440,9 @@ class GroupGamesPlugin(Star):
             return True
         if len(nt) >= 2 and nt in ng:
             return True
-        for i in range(len(ng)):
-            for j in range(i + 2, len(ng) + 1):
-                if ng[i:j] in nt:
-                    return True
+        for i in range(len(ng) - 1):
+            if ng[i : i + 2] in nt:
+                return True
         return False
 
     def do_song(self, key: str, sender_name: str, text: str) -> str:
@@ -514,6 +518,10 @@ class GroupGamesPlugin(Star):
     @filter.on_astrbot_loaded()
     async def _on_loaded(self):
         """AstrBot 加载完成后启动后台清扫任务"""
+        self.initialize()
+
+    def initialize(self):
+        """插件热重载后启动后台清扫任务（on_astrbot_loaded 热重载不触发；幂等）"""
         if self._cleanup_task is None or self._cleanup_task.done():
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 

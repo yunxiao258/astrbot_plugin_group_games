@@ -2,3 +2,5 @@
 plugin_data/
 *.pyc
 data/
+scores.json
+scores.json.tmp

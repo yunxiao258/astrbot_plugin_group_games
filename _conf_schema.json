@@ -18,5 +18,60 @@
     "description": "成语接龙是否允许重复使用已出现的成语（false 表示不允许）",
     "type": "bool",
     "default": false
+  },
+  "spy_min_players": {
+    "description": "谁是卧底开局最少参与人数",
+    "type": "int",
+    "default": 4
+  },
+  "spy_max_players": {
+    "description": "谁是卧底参与人数上限（大群防刷）",
+    "type": "int",
+    "default": 8
+  },
+  "spy_describe_seconds": {
+    "description": "谁是卧底每轮描述阶段限时（秒）",
+    "type": "int",
+    "default": 60
+  },
+  "spy_vote_seconds": {
+    "description": "谁是卧底每轮投票阶段限时（秒）",
+    "type": "int",
+    "default": 30
+  },
+  "idiom_quiz_seconds": {
+    "description": "猜成语单题限时（秒）",
+    "type": "int",
+    "default": 60
+  },
+  "idiom_quiz_cooldown_seconds": {
+    "description": "猜成语答错后的冷却时间（秒），防止刷屏",
+    "type": "int",
+    "default": 5
+  },
+  "game24_seconds": {
+    "description": "24 点单局限时（秒）",
+    "type": "int",
+    "default": 90
+  },
+  "game24_cooldown_seconds": {
+    "description": "24 点每人提交算式的最小间隔（秒），防止刷屏",
+    "type": "int",
+    "default": 3
+  },
+  "price_seconds": {
+    "description": "猜价格单局限时（秒）",
+    "type": "int",
+    "default": 120
+  },
+  "price_cooldown_seconds": {
+    "description": "猜价格每人两次猜测的最小间隔（秒），防止刷屏",
+    "type": "int",
+    "default": 3
+  },
+  "scores_file": {
+    "description": "积分持久化 JSON 文件路径（相对路径基于插件目录解析）",
+    "type": "string",
+    "default": "scores.json"
   }
 }

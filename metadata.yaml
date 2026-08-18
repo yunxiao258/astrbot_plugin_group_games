@@ -1,7 +1,7 @@
 name: astrbot_plugin_group_games
 display_name: 群聊互动小游戏
-desc: 群聊互动小游戏：猜数字/成语接龙/猜歌名
-help: 发送「/游戏」查看玩法列表；「/猜数字」开始猜数字；「/接龙」开始成语接龙；「/猜歌」开始猜歌名
-version: 1.0.0
+desc: 群聊互动小游戏：猜数字/成语接龙/猜歌名/谁是卧底/猜成语/24点/猜价格，积分持久化
+help: 发送「/游戏」查看玩法列表；「/猜数字」「/接龙」「/猜歌」开始经典小游戏；「/卧底 加入」参与谁是卧底；「/猜成语」「/24点」「/猜价格」限时挑战；「/积分」查看排行榜
+version: 1.1.0
 author: 云晓
 repo: https://github.com/yunxiao258/astrbot_plugin_group_games

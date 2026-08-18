@@ -1,14 +1,23 @@
 # -*- coding: utf-8 -*-
-"""AstrBot 群聊互动小游戏插件：猜数字 / 成语接龙 / 猜歌名。
+"""AstrBot 群聊互动小游戏插件：猜数字 / 成语接龙 / 猜歌名 / 谁是卧底 / 猜成语 / 24点 / 猜价格。
 
-三个小游戏均按群/会话（session umo）隔离状态，互不干扰；
-游戏状态纯内存保存，带超时自动清理（后台清扫任务）。
+大部分小游戏按群/会话（session umo）隔离状态，互不干扰；
+谁是卧底采用全局单局锁（同时只允许一局进行）；
+游戏状态纯内存保存，带超时自动清理（后台清扫任务）；
+积分持久化到 JSON 文件（tmp + os.replace 原子写）。
 """
 
+import ast
 import asyncio
+import io
+import json
+import os
 import random
 import re
 import time
+import tokenize
+from fractions import Fraction
+from itertools import permutations, product
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.all import Plain
@@ -151,6 +160,127 @@ SONGS: list[dict] = [
     {"title": "起风了", "artist": "买辣椒也用券", "lyric": "我曾将青春翻涌成她"},
 ]
 
+# ==================== 谁是卧底：近似词对（共 32 对） ====================
+# 每对为 (平民词, 卧底词)，两词相近但不同，靠描述区分
+SPY_WORDS: list[tuple[str, str]] = [
+    ("手机", "座机"),
+    ("咖啡", "奶茶"),
+    ("地铁", "公交"),
+    ("苹果", "香蕉"),
+    ("饺子", "馄饨"),
+    ("可乐", "雪碧"),
+    ("汉堡", "三明治"),
+    ("薯条", "薯片"),
+    ("老虎", "狮子"),
+    ("大象", "河马"),
+    ("鲨鱼", "鲸鱼"),
+    ("狼", "狗"),
+    ("飞机", "火车"),
+    ("汽车", "摩托车"),
+    ("自行车", "电动车"),
+    ("雨伞", "雨衣"),
+    ("帽子", "头盔"),
+    ("袜子", "手套"),
+    ("眼镜", "墨镜"),
+    ("手表", "手环"),
+    ("冰箱", "冰柜"),
+    ("洗衣机", "烘干机"),
+    ("电视", "投影仪"),
+    ("空调", "风扇"),
+    ("台灯", "手电筒"),
+    ("被子", "毯子"),
+    ("枕头", "抱枕"),
+    ("沙发", "椅子"),
+    ("水杯", "保温杯"),
+    ("钱包", "背包"),
+    ("面条", "米粉"),
+    ("米饭", "粥"),
+]
+
+# ==================== 猜成语题库（谜面 + 答案 + 解释，共 52 条） ====================
+IDIOM_QUIZZES: list[dict] = [
+    {"clue": "形容非常高兴、快乐的样子", "answer": "欢天喜地", "explain": "形容非常高兴、快乐。喜、乐：快乐。"},
+    {"clue": "形容非常害怕，身子发抖", "answer": "不寒而栗", "explain": "不冷而发抖。形容非常恐惧。"},
+    {"clue": "形容十分留恋，舍不得离开", "answer": "恋恋不舍", "explain": "形容舍不得离开。恋恋：留恋。"},
+    {"clue": "比喻双方势均力敌，不相上下", "answer": "旗鼓相当", "explain": "双方力量相当，不分上下。旗鼓：古时作战用的旗帜和战鼓。"},
+    {"clue": "形容说话算数，说到做到", "answer": "一言九鼎", "explain": "一句话抵得上九鼎重。形容说话极有分量，说到做到。"},
+    {"clue": "比喻行动迅速，立刻见效", "answer": "立竿见影", "explain": "在阳光下竖起竹竿，立刻就看到影子。比喻见效迅速。"},
+    {"clue": "形容很舍不得离开自己熟悉的地方", "answer": "依依不舍", "explain": "形容舍不得离开。依依：留恋的样子。"},
+    {"clue": "比喻局势危急，情况十分紧张", "answer": "千钧一发", "explain": "千钧重物吊在一根发丝上。比喻情况万分危急。"},
+    {"clue": "形容时间过得飞快", "answer": "光阴似箭", "explain": "时间像箭一样飞逝。形容时间流逝极快。"},
+    {"clue": "比喻做事非常顺利，一举成功", "answer": "马到成功", "explain": "战马一到就取胜。形容事情顺利，很快成功。"},
+    {"clue": "形容记忆深刻，永不忘却", "answer": "刻骨铭心", "explain": "铭刻在心灵深处。形容记忆深刻，永远不忘。"},
+    {"clue": "比喻互相配合，亲密无间", "answer": "如胶似漆", "explain": "像胶和漆那样粘住。形容感情深厚，难分难舍。"},
+    {"clue": "形容说话滔滔不绝，口才好", "answer": "口若悬河", "explain": "说话像瀑布倾泻。形容能说会道，口才极佳。"},
+    {"clue": "比喻以小的代价换取大的利益", "answer": "以小博大", "explain": "用小的投入争取大的收益。比喻风险与收益的权衡。"},
+    {"clue": "形容做事小心谨慎，毫不马虎", "answer": "一丝不苟", "explain": "连最细微的地方也不马虎。形容做事认真细致。"},
+    {"clue": "比喻坚强不屈，坚韧不拔", "answer": "百折不挠", "explain": "无论受多少挫折都不退缩。形容意志坚强。"},
+    {"clue": "形容书籍或作品内容精彩，广为流传", "answer": "脍炙人口", "explain": "美味人人都爱吃。比喻好的诗文人人称赞传诵。"},
+    {"clue": "比喻忘恩负义，恩将仇报", "answer": "过河拆桥", "explain": "过了河就把桥拆掉。比喻达到目的后忘恩负义。"},
+    {"clue": "形容团结一致，力量强大", "answer": "众志成城", "explain": "万众一心，像坚固的城墙。形容团结一致力量无比。"},
+    {"clue": "比喻两者差别极大", "answer": "天壤之别", "explain": "像天和地一样差别巨大。比喻事物之间差异悬殊。"},
+    {"clue": "形容文章或说话简明扼要", "answer": "言简意赅", "explain": "言辞简练，意思完备。形容说话写文章简明扼要。"},
+    {"clue": "形容非常勤奋，坚持不懈", "answer": "持之以恒", "explain": "长久地坚持下去。形容有恒心，不半途而废。"},
+    {"clue": "比喻做事有条理，安排得当", "answer": "井井有条", "explain": "形容条理分明，整齐不乱。井井：整齐的样子。"},
+    {"clue": "形容数量极多，无法计算", "answer": "数不胜数", "explain": "数都数不过来。形容数量极多。"},
+    {"clue": "比喻环境非常安静", "answer": "万籁俱寂", "explain": "形容周围环境非常安静，一点声音都没有。"},
+    {"clue": "比喻人多力量大，集思广益", "answer": "集思广益", "explain": "集中众人智慧，广泛吸收有益意见。"},
+    {"clue": "形容说话做事很有分寸", "answer": "恰到好处", "explain": "说话做事正好达到最适当的地步。"},
+    {"clue": "比喻做事有始有终", "answer": "善始善终", "explain": "做事情有好的开头，也有好的结尾。形容做事能坚持到底。"},
+    {"clue": "形容遇事不慌不忙，沉着镇定", "answer": "从容不迫", "explain": "不慌不忙，沉着镇静。形容遇事镇定自若。"},
+    {"clue": "比喻互相帮助，共同进步", "answer": "取长补短", "explain": "吸取长处，弥补短处。比喻互相学习，共同提高。"},
+    {"clue": "形容兴趣浓厚，乐在其中", "answer": "津津有味", "explain": "形容很有滋味或有兴趣的样子。津：唾液。"},
+    {"clue": "比喻事物发展迅速，势不可挡", "answer": "势如破竹", "explain": "劈竹子时头上几节一破，下面就顺着刀口裂开。比喻节节胜利，毫无阻碍。"},
+    {"clue": "形容非常疲惫，没有力气", "answer": "筋疲力尽", "explain": "筋疲力竭，力气用尽。形容极度疲劳。"},
+    {"clue": "比喻眼光短浅，只看眼前", "answer": "鼠目寸光", "explain": "老鼠的眼光只有一寸远。比喻目光短浅，缺乏远见。"},
+    {"clue": "形容彻底失败，无法挽回", "answer": "一败涂地", "explain": "形容败得不可收拾。涂地：肝脑涂地。"},
+    {"clue": "比喻恰到好处地补充内容，使整体更完美", "answer": "锦上添花", "explain": "在锦上再绣花。比喻好上加好，美中添美。"},
+    {"clue": "形容非常专心，注意力高度集中", "answer": "聚精会神", "explain": "集中精神，专心致志。形容注意力高度集中。"},
+    {"clue": "比喻坚决果断，毫不犹豫", "answer": "当机立断", "explain": "抓住时机，立刻决断。形容处事果断。"},
+    {"clue": "形容数量少而珍贵", "answer": "凤毛麟角", "explain": "凤凰的毛，麒麟的角。比喻稀少而珍贵的人或事物。"},
+    {"clue": "比喻背地里说人坏话，搬弄是非", "answer": "两面三刀", "explain": "当面一套，背后一套。比喻阴险狡猾，耍两面派手法。"},
+    {"clue": "形容形势危急，万分紧迫", "answer": "火烧眉毛", "explain": "火都烧到眉毛了。比喻形势非常急迫。"},
+    {"clue": "比喻不受拘束，自由自在", "answer": "无拘无束", "explain": "没有拘束，自由自在。形容行动自由，不受限制。"},
+    {"clue": "形容两人关系亲密，感情深厚", "answer": "形影不离", "explain": "像形体和影子那样分不开。形容彼此关系密切，经常在一起。"},
+    {"clue": "比喻专心致志，不受外界干扰", "answer": "心无旁骛", "explain": "心思没有别的追求。形容专心致志，专心于一件事。"},
+    {"clue": "形容自以为是，听不进别人意见", "answer": "刚愎自用", "explain": "固执己见，自以为是。形容十分固执自信，不听取他人意见。"},
+    {"clue": "比喻做事有准备，胸有成竹", "answer": "未雨绸缪", "explain": "天还没下雨，先修补好门窗。比喻事先做好准备。"},
+    {"clue": "形容景色优美，令人心旷神怡", "answer": "赏心悦目", "explain": "看了使人心情舒畅。形容美好的景色让人心情愉快。"},
+    {"clue": "比喻力量悬殊，无法对抗", "answer": "寡不敌众", "explain": "人少的敌不过人多的。形容力量悬殊，难以取胜。"},
+    {"clue": "形容坚持不懈，最终成功", "answer": "水滴石穿", "explain": "水滴不断滴落，能把石头滴穿。比喻坚持不懈，终会成功。"},
+    {"clue": "比喻反复无常，变化多端", "answer": "变化多端", "explain": "形容变化极多，难以捉摸。端：头绪。"},
+    {"clue": "形容非常谦虚，不自高自大", "answer": "虚怀若谷", "explain": "胸怀像山谷一样深广。形容十分谦虚，能容纳各种意见。"},
+    {"clue": "比喻事情做到一半就停止", "answer": "半途而废", "explain": "走到半路就停下来。比喻做事不能坚持到底。"},
+]
+
+# ==================== 猜价格：商品表（名称 + 参考价，共 24 件） ====================
+PRICE_ITEMS: list[dict] = [
+    {"name": "苹果手机（一台）", "price": 5999},
+    {"name": "华为手机（一台）", "price": 5499},
+    {"name": "小米手机（一台）", "price": 1999},
+    {"name": "无线蓝牙耳机（一副）", "price": 399},
+    {"name": "机械键盘（一把）", "price": 299},
+    {"name": "电竞鼠标（一个）", "price": 199},
+    {"name": "27 寸显示器（一台）", "price": 1299},
+    {"name": "笔记本电脑（一台）", "price": 5499},
+    {"name": "平板电脑（一台）", "price": 2999},
+    {"name": "智能手表（一块）", "price": 1499},
+    {"name": "咖啡（一杯）", "price": 25},
+    {"name": "奶茶（一杯）", "price": 18},
+    {"name": "电影票（一张）", "price": 45},
+    {"name": "地铁单程票（一张）", "price": 4},
+    {"name": "羽毛球拍（一副）", "price": 350},
+    {"name": "篮球（一个）", "price": 120},
+    {"name": "电动牙刷（一支）", "price": 199},
+    {"name": "保温杯（一个）", "price": 89},
+    {"name": "行李箱（一个）", "price": 399},
+    {"name": "山地自行车（一辆）", "price": 1599},
+    {"name": "电饭煲（一个）", "price": 299},
+    {"name": "空气炸锅（一个）", "price": 399},
+    {"name": "扫地机器人（一台）", "price": 1999},
+    {"name": "加湿器（一台）", "price": 129},
+]
+
 # ==================== 帮助文本 ====================
 HELP_TEXT = (
     "🎮 群聊互动小游戏玩法\n"
@@ -159,14 +289,24 @@ HELP_TEXT = (
     "🐉 成语接龙：/接龙 开始；/接龙 <成语> 接龙；/接龙 结束 结算\n"
     "🎵 猜歌名：/猜歌 开始；/猜歌 <歌名> 猜歌（支持模糊匹配）；"
     "/猜歌 提示 获取歌手提示；/猜歌 放弃\n"
-    "每轮游戏超时未参与将自动结束（超时时间可配置）。"
+    "🕵️ 谁是卧底：/卧底 加入 进房；/卧底 开始 开局（4-8 人）；"
+    "/卧底 描述 <内容> 描述；/卧底 投票 <序号> 投票；/卧底 退出 / 结束\n"
+    "📖 猜成语：/猜成语 开始；/猜成语 <成语> 抢答（答对得分）；/猜成语 放弃\n"
+    "🔢 24 点：/24点 开始；/24点 <算式> 提交（仅 + - * / 与括号）；/24点 放弃\n"
+    "💰 猜价格：/猜价格 开始；/猜价格 <价格> 猜价（提示高低）；/猜价格 放弃\n"
+    "🏆 积分：/积分 查看积分排行榜\n"
+    "每轮游戏限时进行、超时自动结束（时长可配置）。"
 )
 
 # 各游戏的会话内 key
 KEY_GUESS = "guess"
 KEY_CHAIN = "chain"
 KEY_SONG = "song"
-_GAME_KEYS = (KEY_GUESS, KEY_CHAIN, KEY_SONG)
+KEY_SPY = "spy"
+KEY_IDIOM_QUIZ = "idiom_quiz"
+KEY_24 = "game24"
+KEY_PRICE = "price"
+_GAME_KEYS = (KEY_GUESS, KEY_CHAIN, KEY_SONG, KEY_SPY, KEY_IDIOM_QUIZ, KEY_24, KEY_PRICE)
 
 
 @register(PLUGIN_NAME, PLUGIN_AUTHOR, PLUGIN_DESC, PLUGIN_VERSION)
@@ -190,9 +330,60 @@ class GroupGamesPlugin(Star):
         )
         # 猜数字范围最大值
         self.guess_max = self._safe_int(self.config.get("guess_max"), 100)
-        # 游戏状态：session key -> {"guess": state|None, "chain": state|None, "song": state|None}
+        # 谁是卧底：最少/最多参与人数、每轮描述与投票限时（秒）
+        self.spy_min_players = self._safe_int(
+            self.config.get("spy_min_players"), 4
+        )
+        self.spy_max_players = self._safe_int(
+            self.config.get("spy_max_players"), 8
+        )
+        self.spy_describe_seconds = self._safe_int(
+            self.config.get("spy_describe_seconds"), 60
+        )
+        self.spy_vote_seconds = self._safe_int(
+            self.config.get("spy_vote_seconds"), 30
+        )
+        # 猜成语：单题限时与答错冷却（秒）
+        self.idiom_quiz_seconds = self._safe_int(
+            self.config.get("idiom_quiz_seconds"), 60
+        )
+        self.idiom_quiz_cooldown = self._safe_int(
+            self.config.get("idiom_quiz_cooldown_seconds"), 5
+        )
+        # 24 点：单局限时与每人提交冷却（秒）
+        self.game24_seconds = self._safe_int(
+            self.config.get("game24_seconds"), 90
+        )
+        self.game24_cooldown = self._safe_int(
+            self.config.get("game24_cooldown_seconds"), 3
+        )
+        # 猜价格：单局限时与每人猜测冷却（秒）
+        self.price_seconds = self._safe_int(
+            self.config.get("price_seconds"), 120
+        )
+        self.price_cooldown = self._safe_int(
+            self.config.get("price_cooldown_seconds"), 3
+        )
+        # 积分持久化文件（相对路径基于插件目录解析）
+        default_scores = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "scores.json"
+        )
+        scores_cfg = self.config.get("scores_file") or default_scores
+        self.scores_path = (
+            scores_cfg
+            if os.path.isabs(scores_cfg)
+            else os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), scores_cfg
+            )
+        )
+        # 游戏状态：session key -> {"guess": ..., "chain": ..., "song": ..., ...}
         self._sessions: dict[str, dict] = {}
         self._cleanup_task: asyncio.Task | None = None
+        # 谁是卧底全局单局锁：记录当前进行中卧底局所在的会话 key
+        self._spy_owner: str | None = None
+        # 积分表：sender_id -> {"name": 最近昵称, "points": 累计得分}
+        self._scores: dict[str, dict] = {}
+        self._load_scores()
         logger.info(f"【{PLUGIN_NAME}】群聊互动小游戏插件初始化完成")
 
     # ==================== 工具方法 ====================
@@ -249,24 +440,67 @@ class GroupGamesPlugin(Star):
     def _session(self, key: str) -> dict:
         """获取（必要时创建）某会话的游戏状态容器"""
         if key not in self._sessions:
-            self._sessions[key] = {KEY_GUESS: None, KEY_CHAIN: None, KEY_SONG: None}
+            self._sessions[key] = {g: None for g in _GAME_KEYS}
         return self._sessions[key]
 
-    @staticmethod
-    def _expired(game: dict, timeout: float) -> bool:
-        """判断游戏是否已超时"""
-        return time.time() - game.get("last_activity", 0) > timeout
+    def _expired(self, game: dict, timeout: float = None, now: float = None) -> bool:
+        """判断游戏是否已超时；timeout 缺省时优先用游戏自带 seconds，否则用全局值"""
+        if timeout is None:
+            timeout = game.get("seconds") or self.timeout_seconds
+        now = now if now is not None else time.time()
+        return now - game.get("last_activity", 0) > timeout
 
     def _lazy_expire(self, key: str, gkey: str) -> bool:
-        """惰性超时检查：游戏超时则就地清除，返回是否被清除"""
+        """惰性超时检查：游戏超时则就地清除（谁是卧底同时释放全局锁），返回是否被清除"""
         sess = self._sessions.get(key)
         if not sess:
             return False
         game = sess.get(gkey)
-        if game is not None and self._expired(game, self.timeout_seconds):
+        if game is not None and self._expired(game):
             sess[gkey] = None
+            if gkey == KEY_SPY:
+                self._release_spy_lock(key)
             return True
         return False
+
+    # ==================== 积分持久化（JSON 原子写） ====================
+
+    def _load_scores(self):
+        """从磁盘加载积分表（文件缺失/损坏时静默回退为空表）"""
+        try:
+            with open(self.scores_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self._scores = data
+        except (OSError, ValueError, TypeError):
+            self._scores = {}
+
+    def _save_scores(self):
+        """积分表写入磁盘：先写 tmp 再 os.replace 原子替换，避免写一半损坏"""
+        try:
+            tmp = self.scores_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._scores, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.scores_path)
+        except OSError as e:
+            logger.warning(f"【{PLUGIN_NAME}】积分保存失败: {e}")
+
+    def _add_score(self, sender_id: str, name: str, points: int) -> int:
+        """为玩家增加积分并原子持久化，返回其累计总分"""
+        points = self._safe_int(points, 0)
+        if sender_id == "未知" or not sender_id:
+            return 0
+        entry = self._scores.setdefault(sender_id, {"name": name or "群友", "points": 0})
+        entry["points"] = entry.get("points", 0) + points
+        if name:
+            entry["name"] = name
+        self._save_scores()
+        return entry["points"]
+
+    def _release_spy_lock(self, key: str):
+        """释放谁是卧底全局单局锁（若锁属于该会话）"""
+        if self._spy_owner == key:
+            self._spy_owner = None
 
     # ==================== 猜数字 ====================
 
@@ -489,6 +723,696 @@ class GroupGamesPlugin(Star):
         sess[KEY_SONG] = None
         return f"🔓 答案揭晓：《{title}》- {artist}，下次加油！"
 
+    # ==================== 谁是卧底（全局单局锁） ====================
+
+    @staticmethod
+    def _spy_phase_name(game: dict) -> str:
+        """卧底局阶段的中文名"""
+        return {
+            "joining": "加入中",
+            "describing": "描述中",
+            "voting": "投票中",
+        }.get(game.get("phase"), str(game.get("phase")))
+
+    @staticmethod
+    def _spy_alive_list(game: dict) -> list:
+        """存活玩家列表（按加入顺序），每项 (sender_id, player_dict)"""
+        return [
+            (pid, p) for pid, p in game["players"].items() if p.get("alive")
+        ]
+
+    def _spy_vote_prompt(self, game: dict) -> str:
+        """生成投票阶段的提示文本（含存活玩家编号名单）"""
+        lines = [
+            f"🗳️ 投票阶段开始（限时 {game.get('vote_seconds', 30)} 秒）！"
+            "存活玩家请发送「/卧底 投票 <序号>」（每人 1 票）："
+        ]
+        for i, (_, p) in enumerate(self._spy_alive_list(game), 1):
+            lines.append(f"{i}. {p['name']}")
+        return "\n".join(lines)
+
+    def _spy_finish(self, key: str, game: dict, winner: str) -> str:
+        """谁是卧底结束：揭晓身份、结算积分、清理状态并释放全局锁"""
+        lines = []
+        if winner == "平民":
+            lines.append("🎉 平民获胜！卧底已被揪出。")
+            for pid, p in game["players"].items():
+                if p.get("alive"):
+                    self._add_score(pid, p["name"], 3)
+        elif winner == "卧底":
+            lines.append("🎉 卧底获胜！成功潜伏到最后。")
+            for pid, p in game["players"].items():
+                if p.get("is_spy"):
+                    self._add_score(pid, p["name"], 5)
+        else:
+            lines.append(f"🏁 {winner}")
+        spy_name = next(
+            (p["name"] for p in game["players"].values() if p.get("is_spy")),
+            "未知",
+        )
+        lines.append(
+            f"🔓 本局词对：平民「{game.get('civilian_word')}」/ "
+            f"卧底「{game.get('spy_word')}」，卧底是 {spy_name}。"
+        )
+        sess = self._sessions.get(key)
+        if sess:
+            sess[KEY_SPY] = None
+        self._release_spy_lock(key)
+        return "\n".join(lines)
+
+    def _spy_resolve(self, key: str, game: dict, now: float = None) -> str:
+        """结算当前投票：票最多者出局；卧底出局平民胜，卧底存活至剩 2 人卧底胜"""
+        now = now if now is not None else time.time()
+        votes = game.get("votes") or {}
+        alive = self._spy_alive_list(game)
+        if not alive:
+            return self._spy_finish(key, game, "所有玩家均已出局，游戏结束。")
+        if votes:
+            tally: dict[str, int] = {}
+            for v in votes.values():
+                tally[v] = tally.get(v, 0) + 1
+            top = max(tally.values())
+            top_ids = [pid for pid, c in tally.items() if c == top]
+            # 平票时从最高票者中随机淘汰一人，保证游戏继续推进
+            target = random.choice(top_ids) if len(top_ids) > 1 else top_ids[0]
+            lines = [f"🗳️ 投票结果：最高 {top} 票。"]
+        else:
+            # 无人投票：随机淘汰一名存活玩家，保证游戏有进展
+            target = random.choice([pid for pid, _ in alive])
+            lines = ["🗳️ 本轮无人投票，随机淘汰一名玩家。"]
+        game["players"][target]["alive"] = False
+        lines.append(f"💀 {game['players'][target]['name']} 被淘汰出局！")
+        # 胜负判定：先看卧底是否出局（平民胜），再看存活人数（卧底胜）
+        alive_now = [p for p in game["players"].values() if p["alive"]]
+        spy_alive = [p for p in alive_now if p.get("is_spy")]
+        if not spy_alive:
+            lines.append(self._spy_finish(key, game, "平民"))
+            return "\n".join(lines)
+        if len(alive_now) <= 2:
+            lines.append(self._spy_finish(key, game, "卧底"))
+            return "\n".join(lines)
+        # 进入下一轮描述
+        game["round"] += 1
+        game["phase"] = "describing"
+        game["phase_start"] = now
+        game["described"] = set()
+        game["votes"] = {}
+        game["last_activity"] = now
+        lines.append(
+            f"🔁 卧底仍在场上！进入第 {game['round']} 轮描述，"
+            f"存活 {len(alive_now)} 人，每人限描述 1 次（限时 "
+            f"{game.get('describe_seconds', 60)} 秒）。"
+        )
+        return "\n".join(lines)
+
+    def _spy_poll(self, key: str, game: dict, now: float = None) -> str:
+        """惰性推进谁是卧底阶段；返回需要播报的文本（无阶段变化返回空串）"""
+        now = now if now is not None else time.time()
+        phase = game.get("phase")
+        if phase == "describing":
+            if now - game.get("phase_start", 0) > game.get("describe_seconds", 60):
+                game["phase"] = "voting"
+                game["phase_start"] = now
+                game["votes"] = {}
+                game["last_activity"] = now
+                return "⏰ 描述时间到，进入投票阶段！\n" + self._spy_vote_prompt(game)
+        elif phase == "voting":
+            if now - game.get("phase_start", 0) > game.get("vote_seconds", 30):
+                game["last_activity"] = now
+                return "⏰ 投票时间到，开始结算！\n" + self._spy_resolve(key, game)
+        return ""
+
+    def spy_status(self, key: str) -> str:
+        """查看当前谁是卧底局状态，返回提示文本"""
+        sess = self._session(key)
+        if self._lazy_expire(key, KEY_SPY):
+            return "⏰ 上一局谁是卧底已超时结束，发送「/卧底 加入」重新开局吧。"
+        game = sess[KEY_SPY]
+        if not game:
+            if self._spy_owner and self._spy_owner != key:
+                return "⚠️ 其他群正在进行谁是卧底（全局单局限制），请稍后再试。"
+            return "⚠️ 当前没有进行中的谁是卧底。发送「/卧底 加入」参与（4-8 人开局）。"
+        poll_text = self._spy_poll(key, game)
+        if poll_text:
+            return poll_text
+        lines = [
+            f"🕵️ 谁是卧底（第 {game['round']} 轮 · {self._spy_phase_name(game)}）"
+        ]
+        for i, (_, p) in enumerate(self._spy_alive_list(game), 1):
+            lines.append(f"{i}. {p['name']}")
+        lines.append(
+            f"共 {len(self._spy_alive_list(game))} 名存活玩家，"
+            "发送「/卧底 加入」加入、「/卧底 开始」开局、「/卧底 退出」退出。"
+        )
+        return "\n".join(lines)
+
+    def do_spy_join(self, key: str, sender_id: str, sender_name: str) -> str:
+        """加入谁是卧底（无局时创建并占用全局单局锁），返回提示文本"""
+        sess = self._session(key)
+        if self._lazy_expire(key, KEY_SPY):
+            return "⏰ 上一局谁是卧底已超时结束，请重新加入。"
+        game = sess[KEY_SPY]
+        if not game:
+            # 全局单局锁检查：其他群有活跃卧底局则拒绝
+            if self._spy_owner and self._spy_owner != key:
+                other = self._sessions.get(self._spy_owner)
+                if other and other.get(KEY_SPY):
+                    return "⚠️ 全局单局限制：其他群正在进行谁是卧底，请稍后再试。"
+                self._spy_owner = None  # 旧局已不存在，抢占锁
+            game = {
+                "phase": "joining",
+                "players": {},
+                "round": 1,
+                "phase_start": time.time(),
+                "describe_seconds": self.spy_describe_seconds,
+                "vote_seconds": self.spy_vote_seconds,
+                "seconds": 600,  # 整局无活动兜底超时；阶段推进由各自时限负责
+                "last_activity": time.time(),
+            }
+            sess[KEY_SPY] = game
+            self._spy_owner = key
+        if game["phase"] != "joining":
+            return "⚠️ 游戏已开始，不能中途加入。"
+        if len(game["players"]) >= self.spy_max_players:
+            return f"⚠️ 人数已满（上限 {self.spy_max_players} 人）。"
+        if sender_id in game["players"]:
+            return "⚠️ 你已经加入本局了。"
+        game["players"][sender_id] = {"name": sender_name or "群友", "alive": True}
+        game["last_activity"] = time.time()
+        n = len(game["players"])
+        return (
+            f"✅ {sender_name or '群友'} 加入成功！当前 {n}/{self.spy_max_players} 人。\n"
+            f"发送「/卧底 开始」开局（需 {self.spy_min_players}-"
+            f"{self.spy_max_players} 人），「/卧底 退出」退出。"
+        )
+
+    def start_spy(self, key: str) -> str:
+        """开始谁是卧底：发词、随机指定卧底、进入描述阶段"""
+        sess = self._session(key)
+        if self._lazy_expire(key, KEY_SPY):
+            return "⏰ 上一局谁是卧底已超时结束，请重新加入。"
+        game = sess[KEY_SPY]
+        if not game:
+            return "⚠️ 当前没有进行中的谁是卧底，请先发送「/卧底 加入」。"
+        if game["phase"] != "joining":
+            return "⚠️ 游戏已开始，不能重复开局。"
+        n = len(game["players"])
+        if n < self.spy_min_players:
+            return (
+                f"⚠️ 人数不足：当前 {n} 人，至少需要 {self.spy_min_players} 人。"
+                "请邀请更多群友「/卧底 加入」。"
+            )
+        civilian, spy_word = random.choice(SPY_WORDS)
+        player_ids = list(game["players"].keys())
+        spy_id = random.choice(player_ids)
+        for pid in player_ids:
+            is_spy = pid == spy_id
+            game["players"][pid]["word"] = spy_word if is_spy else civilian
+            game["players"][pid]["is_spy"] = is_spy
+        game["civilian_word"] = civilian
+        game["spy_word"] = spy_word
+        game["round"] = 1
+        game["phase"] = "describing"
+        game["phase_start"] = time.time()
+        game["described"] = set()
+        game["votes"] = {}
+        game["last_activity"] = time.time()
+        return (
+            f"🕵️ 谁是卧底开局！本局 {n} 人，其中 1 人是卧底。\n"
+            f"🔑 本局词对：平民「{civilian}」/ 卧底「{spy_word}」"
+            f"（卧底请假装平民词描述哦～）\n"
+            f"💬 请存活玩家依次发送「/卧底 描述 <内容>」描述自己的词，"
+            f"每人每轮限 1 次，限时 {self.spy_describe_seconds} 秒；"
+            f"描述完毕后进入投票「/卧底 投票 <序号>」。"
+        )
+
+    def do_spy_desc(self, key: str, sender_id: str, sender_name: str, text: str) -> str:
+        """卧底描述：每轮每人限 1 次；全部描述完毕后自动进入投票"""
+        sess = self._session(key)
+        if self._lazy_expire(key, KEY_SPY):
+            return "⏰ 谁是卧底已超时结束。"
+        game = sess[KEY_SPY]
+        if not game:
+            return "⚠️ 当前没有进行中的谁是卧底。"
+        poll_text = self._spy_poll(key, game)
+        if poll_text:
+            return poll_text
+        if game["phase"] == "joining":
+            return "⚠️ 游戏还未开始，请发送「/卧底 开始」。"
+        if game["phase"] != "describing":
+            return "⚠️ 当前是投票阶段，请发送「/卧底 投票 <序号>」。"
+        player = game["players"].get(sender_id)
+        if not player or not player.get("alive"):
+            return "⚠️ 你已经出局，不能描述。"
+        if sender_id in game["described"]:
+            return "⚠️ 你本轮已经描述过了（每人每轮限 1 次）。"
+        text = (text or "").strip()
+        if not text:
+            return "❓ 描述内容不能为空，格式：/卧底 描述 <内容>"
+        game["described"].add(sender_id)
+        game["last_activity"] = time.time()
+        lines = [f"💬 {sender_name}：{text[:100]}"]  # 截断超长消息防刷屏
+        alive_n = len(self._spy_alive_list(game))
+        if len(game["described"]) >= alive_n:
+            # 所有存活玩家均已描述：进入投票
+            game["phase"] = "voting"
+            game["phase_start"] = time.time()
+            game["votes"] = {}
+            lines.append(self._spy_vote_prompt(game))
+        else:
+            lines.append(
+                f"⏳ 本轮还剩 {alive_n - len(game['described'])} 人未描述。"
+            )
+        return "\n".join(lines)
+
+    def do_spy_vote(self, key: str, sender_id: str, idx_text: str) -> str:
+        """卧底投票：每人 1 票；全部投完后立即结算淘汰"""
+        sess = self._session(key)
+        if self._lazy_expire(key, KEY_SPY):
+            return "⏰ 谁是卧底已超时结束。"
+        game = sess[KEY_SPY]
+        if not game:
+            return "⚠️ 当前没有进行中的谁是卧底。"
+        poll_text = self._spy_poll(key, game)
+        if poll_text:
+            return poll_text
+        if game["phase"] == "joining":
+            return "⚠️ 游戏还未开始。"
+        if game["phase"] != "voting":
+            return "⚠️ 当前是描述阶段，请发送「/卧底 描述 <内容>」。"
+        player = game["players"].get(sender_id)
+        if not player or not player.get("alive"):
+            return "⚠️ 只有存活的玩家可以投票。"
+        if sender_id in game["votes"]:
+            return "⚠️ 你本轮已经投过票了（每人 1 票）。"
+        idx = self._safe_int(idx_text, 0)
+        alive = self._spy_alive_list(game)
+        if idx < 1 or idx > len(alive):
+            return (
+                f"❌ 无效序号，请输入 1-{len(alive)}"
+                "（发送「/卧底 状态」查看存活名单）。"
+            )
+        target_id = alive[idx - 1][0]
+        if target_id == sender_id:
+            return "❌ 不能投自己哦。"
+        game["votes"][sender_id] = target_id
+        game["last_activity"] = time.time()
+        voted = len(game["votes"])
+        total = len(alive)
+        if voted >= total:
+            # 全员投票完毕：立即结算
+            return self._spy_resolve(key, game)
+        return (
+            f"🗳️ {player['name']} 投票成功（{voted}/{total}），"
+            "等待其他人投票或超时自动结算。"
+        )
+
+    def do_spy_quit(self, key: str, sender_id: str) -> str:
+        """退出谁是卧底；退出后存活人数不足时按规则结算"""
+        sess = self._session(key)
+        if self._lazy_expire(key, KEY_SPY):
+            return "⏰ 谁是卧底已超时结束。"
+        game = sess[KEY_SPY]
+        if not game:
+            return "⚠️ 当前没有进行中的谁是卧底。"
+        if sender_id not in game["players"]:
+            return "⚠️ 你不在本局玩家中。"
+        name = game["players"][sender_id]["name"]
+        del game["players"][sender_id]
+        game["last_activity"] = time.time()
+        if game["phase"] == "joining":
+            if not game["players"]:
+                sess[KEY_SPY] = None
+                self._release_spy_lock(key)
+                return "🏁 所有玩家已退出，本局解散。"
+            return f"✅ {name} 已退出。当前 {len(game['players'])} 人，仍可「/卧底 开始」。"
+        # 游戏进行中：退出视同离场，检查胜负
+        alive = self._spy_alive_list(game)
+        spy_alive = [p for p in game["players"].values() if p.get("is_spy")]
+        if not alive:
+            return self._spy_finish(key, game, "所有玩家均已退出，游戏结束。")
+        if not spy_alive:
+            return f"✅ {name} 已退出。" + self._spy_finish(key, game, "平民")
+        if len(alive) <= 2:
+            return f"✅ {name} 已退出。" + self._spy_finish(key, game, "卧底")
+        if game["phase"] == "voting":
+            # 投票阶段有人退出：按当前已有票数立即结算
+            return f"✅ {name} 已退出。" + self._spy_resolve(key, game)
+        return f"✅ {name} 已退出，游戏继续。"
+
+    def end_spy(self, key: str) -> str:
+        """强制结束谁是卧底并揭晓答案"""
+        sess = self._session(key)
+        if self._lazy_expire(key, KEY_SPY):
+            return "⏰ 谁是卧底已超时结束。"
+        game = sess[KEY_SPY]
+        if not game:
+            return "⚠️ 当前没有进行中的谁是卧底。"
+        return self._spy_finish(key, game, "本局由房主提前结束")
+
+    # ==================== 猜成语（限时抢答 + 冷却防刷） ====================
+
+    def start_idiom_quiz(self, key: str) -> str:
+        """开始猜成语，返回提示文本"""
+        sess = self._session(key)
+        if sess[KEY_IDIOM_QUIZ] and not self._expired(sess[KEY_IDIOM_QUIZ]):
+            return "⚠️ 已有进行中的猜成语，请先发送「/猜成语 放弃」结束当前题目。"
+        quiz = random.choice(IDIOM_QUIZZES)
+        sess[KEY_IDIOM_QUIZ] = {
+            "quiz": quiz,
+            "cooldown_until": 0.0,  # 答错后的冷却截止时间（防刷屏）
+            "seconds": self.idiom_quiz_seconds,
+            "last_activity": time.time(),
+        }
+        return (
+            f"📖 猜成语开始！谜面：\n「{quiz['clue']}」\n"
+            f"回复「/猜成语 <成语>」抢答（限时 {self.idiom_quiz_seconds} 秒，"
+            "答对得 2 分），「/猜成语 放弃」揭晓答案。"
+        )
+
+    def do_idiom_quiz(self, key: str, sender_id: str, sender_name: str, text: str) -> str:
+        """抢答猜成语：答错进入冷却防刷；答对得分并展示解释"""
+        sess = self._session(key)
+        if self._lazy_expire(key, KEY_IDIOM_QUIZ):
+            return "⏰ 猜成语已超时结束，发送「/猜成语」重新开始吧。"
+        game = sess[KEY_IDIOM_QUIZ]
+        if not game:
+            return "⚠️ 当前没有进行中的猜成语，发送「/猜成语」开始。"
+        guess = re.sub(r"\s+", "", text or "")
+        if not guess:
+            return "❓ 请输入答案，格式：/猜成语 <成语>"
+        now = time.time()
+        if now < game.get("cooldown_until", 0):
+            left = int(game["cooldown_until"] - now) + 1
+            return f"⏳ 冷却中，请 {left} 秒后再试（防止刷屏）。"
+        answer = game["quiz"]["answer"]
+        if guess == answer:
+            total = self._add_score(sender_id, sender_name, 2)
+            sess[KEY_IDIOM_QUIZ] = None
+            return (
+                f"🎉 恭喜 {sender_name} 答对！答案是「{answer}」。\n"
+                f"📚 解释：{game['quiz']['explain']}\n"
+                f"🏆 {sender_name} 当前积分：{total}。"
+            )
+        # 答错：进入冷却防刷
+        game["cooldown_until"] = now + self.idiom_quiz_cooldown
+        game["last_activity"] = now
+        return (
+            f"❌ 不对哦，再想想～（{self.idiom_quiz_cooldown} 秒冷却防刷）"
+        )
+
+    def give_up_idiom_quiz(self, key: str) -> str:
+        """放弃猜成语并揭晓答案"""
+        sess = self._session(key)
+        if self._lazy_expire(key, KEY_IDIOM_QUIZ):
+            return "⏰ 猜成语已超时结束。"
+        game = sess[KEY_IDIOM_QUIZ]
+        if not game:
+            return "⚠️ 当前没有进行中的猜成语。"
+        answer = game["quiz"]["answer"]
+        explain = game["quiz"]["explain"]
+        sess[KEY_IDIOM_QUIZ] = None
+        return f"🔓 答案揭晓：「{answer}」\n📚 {explain}，下次加油！"
+
+    # ==================== 24 点（安全表达式校验器） ====================
+
+    _24_TOKEN_OPS = {"+", "-", "*", "/", "(", ")"}
+
+    @staticmethod
+    def _try_24_op(a: Fraction, b: Fraction, op: str):
+        """24 点求解辅助：单步四则运算，除零返回 None"""
+        if op == "+":
+            return a + b
+        if op == "-":
+            return a - b
+        if op == "*":
+            return a * b
+        if op == "/":
+            return a / b if b != 0 else None
+        return None
+
+    @classmethod
+    def _cards_solvable(cls, cards: list[int]) -> bool:
+        """判断 4 张牌能否通过 + - * / 算出 24。
+
+        枚举全部数字排列 × 运算符组合 × 5 种括号结构，用 Fraction 精确计算。
+        """
+        for a, b, c, d in permutations(cards):
+            # 先转 Fraction，避免 int/int 的浮点误差导致精确性判断失误
+            a, b, c, d = Fraction(a), Fraction(b), Fraction(c), Fraction(d)
+            for o1, o2, o3 in product("+-*/", repeat=3):
+                r_ab = cls._try_24_op(a, b, o1)
+                r_bc = cls._try_24_op(b, c, o2)
+                r_cd = cls._try_24_op(c, d, o3)
+                # ((a∘b)∘c)∘d
+                if r_ab is not None:
+                    r = cls._try_24_op(r_ab, c, o2)
+                    if r is not None and cls._try_24_op(r, d, o3) == 24:
+                        return True
+                # (a∘(b∘c))∘d
+                if r_bc is not None:
+                    r = cls._try_24_op(a, r_bc, o1)
+                    if r is not None and cls._try_24_op(r, d, o3) == 24:
+                        return True
+                # a∘((b∘c)∘d)
+                if r_bc is not None:
+                    r = cls._try_24_op(r_bc, d, o3)
+                    if r is not None and cls._try_24_op(a, r, o1) == 24:
+                        return True
+                # a∘(b∘(c∘d))
+                if r_cd is not None:
+                    r = cls._try_24_op(b, r_cd, o2)
+                    if r is not None and cls._try_24_op(a, r, o1) == 24:
+                        return True
+                # (a∘b)∘(c∘d)
+                if r_ab is not None and r_cd is not None:
+                    if cls._try_24_op(r_ab, r_cd, o2) == 24:
+                        return True
+        return False
+
+    @classmethod
+    def _safe_eval_24(cls, node) -> Fraction:
+        """仅允许「整数常量 + - * / 二元运算」的安全求值器（绝不执行任意代码）"""
+        if isinstance(node, ast.Constant):
+            if not isinstance(node.value, int):
+                raise ValueError("仅允许整数")
+            return Fraction(node.value)
+        if isinstance(node, ast.BinOp):
+            opname = type(node.op).__name__
+            if opname not in ("Add", "Sub", "Mult", "Div"):
+                raise ValueError(f"非法运算符：{opname}")
+            left = cls._safe_eval_24(node.left)
+            right = cls._safe_eval_24(node.right)
+            if opname == "Add":
+                return left + right
+            if opname == "Sub":
+                return left - right
+            if opname == "Mult":
+                return left * right
+            if right == 0:
+                raise ZeroDivisionError("除数不能为 0")
+            return left / right
+        raise ValueError("仅支持四则运算与括号")
+
+    @classmethod
+    def _validate_24_expr(cls, expr: str, cards: list[int]) -> tuple:
+        """严格校验 24 点算式，返回 (是否合法, 说明文本)。
+
+        规则：仅允许 + - * / 与括号；数字必须恰好为给定的 4 张牌
+        （每个数字的使用次数与牌面一致）；tokenize 词法白名单 + AST
+        白名单双重防线，杜绝幂运算/函数调用/属性访问等注入；
+        Fraction 精确求值（无浮点误差），结果必须精确等于 24。
+        """
+        text = (expr or "").strip()
+        if not text:
+            return False, "算式为空"
+        # 第一道防线：tokenize 词法白名单
+        used: list[int] = []
+        try:
+            tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+            for tok in tokens:
+                if tok.type in (
+                    tokenize.ENDMARKER,
+                    tokenize.NL,
+                    tokenize.NEWLINE,
+                    tokenize.INDENT,
+                    tokenize.DEDENT,
+                ):
+                    continue
+                if tok.type == tokenize.NUMBER:
+                    # 仅接受十进制整数（拒绝 1.5 / 1e3 / 0x10 / 1_000 等）
+                    if re.fullmatch(r"\d+", tok.string) is None:
+                        return False, f"非法数字字面量：{tok.string}"
+                    used.append(int(tok.string))
+                elif tok.type == tokenize.OP:
+                    if tok.string not in cls._24_TOKEN_OPS:
+                        return False, f"非法运算符：{tok.string}"
+                else:
+                    return False, f"非法内容：{tok.string}"
+        except (tokenize.TokenError, IndentationError) as e:
+            return False, f"表达式无法解析：{e}"
+        # 数字必须恰好等于给定的 4 张牌（多重集合一致）
+        if sorted(used) != sorted(cards):
+            return False, "数字必须恰好使用给定的 4 张牌（每个数字只能使用对应次数）"
+        # 第二道防线：AST 白名单 + Fraction 精确求值
+        try:
+            tree = ast.parse(text, mode="eval")
+            value = cls._safe_eval_24(tree.body)
+        except (SyntaxError, ValueError, ZeroDivisionError) as e:
+            return False, f"表达式不合法：{e}"
+        if value == 24:
+            return True, "正确！"
+        return False, f"计算结果为 {value}，不等于 24"
+
+    @staticmethod
+    def _deal_24_cards() -> list[int]:
+        """随机发 4 张 1-13 的牌，重试直到确认有解（上限 50 次兜底）"""
+        for _ in range(50):
+            cards = sorted(random.choices(range(1, 14), k=4))
+            if GroupGamesPlugin._cards_solvable(cards):
+                return cards
+        return sorted(random.choices(range(1, 14), k=4))
+
+    def start_24(self, key: str) -> str:
+        """开始 24 点：随机发 4 张有解的牌，返回提示文本"""
+        sess = self._session(key)
+        if sess[KEY_24] and not self._expired(sess[KEY_24]):
+            return "⚠️ 已有进行中的 24 点，请先发送「/24点 放弃」结束当前一局。"
+        cards = self._deal_24_cards()
+        sess[KEY_24] = {
+            "cards": cards,
+            "cooldown": {},  # sender_id -> 上次提交时间（防刷）
+            "seconds": self.game24_seconds,
+            "last_activity": time.time(),
+        }
+        return (
+            f"🔢 24 点挑战开始！牌面：{' '.join(map(str, cards))}\n"
+            f"发送「/24点 <算式>」提交（仅 + - * / 与括号，恰好使用 4 张牌），"
+            f"限时 {self.game24_seconds} 秒，答对得 3 分。"
+        )
+
+    def do_24(self, key: str, sender_id: str, sender_name: str, text: str) -> str:
+        """提交 24 点算式：防刷冷却 + 严格校验 + 精确求值"""
+        sess = self._session(key)
+        if self._lazy_expire(key, KEY_24):
+            return "⏰ 24 点已超时结束，发送「/24点」重新开始吧。"
+        game = sess[KEY_24]
+        if not game:
+            return "⚠️ 当前没有进行中的 24 点，发送「/24点」开始。"
+        now = time.time()
+        last = game["cooldown"].get(sender_id, 0)
+        if now - last < self.game24_cooldown:
+            left = int(self.game24_cooldown - (now - last)) + 1
+            return f"⏳ 提交太频繁，请 {left} 秒后再试。"
+        ok, msg = self._validate_24_expr(text, game["cards"])
+        game["cooldown"][sender_id] = now
+        if not ok:
+            game["last_activity"] = now
+            return f"❌ {msg}"
+        # 校验通过且结果精确等于 24：得分并结束
+        total = self._add_score(sender_id, sender_name, 3)
+        sess[KEY_24] = None
+        return (
+            f"🎉 恭喜 {sender_name} 算出 24！算式：{text.strip()}\n"
+            f"🏆 {sender_name} 当前积分：{total}。"
+        )
+
+    def give_up_24(self, key: str) -> str:
+        """放弃 24 点并揭晓本局牌面"""
+        sess = self._session(key)
+        if self._lazy_expire(key, KEY_24):
+            return "⏰ 24 点已超时结束。"
+        game = sess[KEY_24]
+        if not game:
+            return "⚠️ 当前没有进行中的 24 点。"
+        cards = game["cards"]
+        sess[KEY_24] = None
+        return f"🔓 本局牌面：{' '.join(map(str, cards))}，下次加油！"
+
+    # ==================== 猜价格（高低提示 + 冷却防刷） ====================
+
+    def start_price(self, key: str) -> str:
+        """开始猜价格：随机抽取商品，返回提示文本"""
+        sess = self._session(key)
+        if sess[KEY_PRICE] and not self._expired(sess[KEY_PRICE]):
+            return "⚠️ 已有进行中的猜价格，请先发送「/猜价格 放弃」结束当前一局。"
+        item = random.choice(PRICE_ITEMS)
+        sess[KEY_PRICE] = {
+            "item": item,
+            "last_guess": {},  # sender_id -> 上次猜测时间（防刷）
+            "seconds": self.price_seconds,
+            "last_activity": time.time(),
+        }
+        return (
+            f"💰 猜价格开始！请猜这件商品的价格：\n「{item['name']}」\n"
+            f"发送「/猜价格 <数字>」猜价（会提示高了/低了），"
+            f"限时 {self.price_seconds} 秒，猜中得 2 分。"
+        )
+
+    def do_price(self, key: str, sender_id: str, sender_name: str, text: str) -> str:
+        """猜价格：每人 3 秒冷却防刷；高了/低了提示；猜中得分"""
+        sess = self._session(key)
+        if self._lazy_expire(key, KEY_PRICE):
+            return "⏰ 猜价格已超时结束，发送「/猜价格」重新开始吧。"
+        game = sess[KEY_PRICE]
+        if not game:
+            return "⚠️ 当前没有进行中的猜价格，发送「/猜价格」开始。"
+        now = time.time()
+        last = game["last_guess"].get(sender_id, 0)
+        if now - last < self.price_cooldown:
+            left = int(self.price_cooldown - (now - last)) + 1
+            return f"⏳ 猜得太快啦，请 {left} 秒后再猜。"
+        guess = self._safe_int(text, 0)
+        if guess <= 0:
+            return "❓ 请输入正整数价格，格式：/猜价格 <数字>"
+        game["last_guess"][sender_id] = now
+        game["last_activity"] = now
+        price = game["item"]["price"]
+        if guess == price:
+            total = self._add_score(sender_id, sender_name, 2)
+            name = game["item"]["name"]
+            sess[KEY_PRICE] = None
+            return (
+                f"🎉 恭喜 {sender_name} 猜中！「{name}」的价格正是 {price} 元！\n"
+                f"🏆 {sender_name} 当前积分：{total}。"
+            )
+        diff = abs(guess - price)
+        hint = "低了" if guess < price else "高了"
+        if diff <= 10:
+            hint += "（很接近了！）"
+        return f"{hint}！继续猜～"
+
+    def give_up_price(self, key: str) -> str:
+        """放弃猜价格并揭晓答案"""
+        sess = self._session(key)
+        if self._lazy_expire(key, KEY_PRICE):
+            return "⏰ 猜价格已超时结束。"
+        game = sess[KEY_PRICE]
+        if not game:
+            return "⚠️ 当前没有进行中的猜价格。"
+        item = game["item"]
+        sess[KEY_PRICE] = None
+        return (
+            f"🔓 答案揭晓：「{item['name']}」的价格是 {item['price']} 元，下次加油！"
+        )
+
+    # ==================== 积分排行榜 ====================
+
+    def show_scores(self) -> str:
+        """展示积分排行榜 Top 10"""
+        if not self._scores:
+            return "🏆 积分榜空空如也，快来参与小游戏赚积分吧！"
+        top = sorted(
+            self._scores.items(),
+            key=lambda kv: kv[1].get("points", 0),
+            reverse=True,
+        )[:10]
+        lines = ["🏆 积分排行榜 Top 10："]
+        for i, (_, entry) in enumerate(top, 1):
+            name = entry.get("name") or "群友"
+            lines.append(f"{i}. {name}：{entry.get('points', 0)} 分")
+        return "\n".join(lines)
+
     # ==================== 超时清扫 ====================
 
     def _sweep_expired(self, now: float = None) -> int:
@@ -499,8 +1423,10 @@ class GroupGamesPlugin(Star):
             sess = self._sessions[key]
             for gkey in _GAME_KEYS:
                 game = sess.get(gkey)
-                if game is not None and self._expired(game, self.timeout_seconds):
+                if game is not None and self._expired(game, now=now):
                     sess[gkey] = None
+                    if gkey == KEY_SPY:
+                        self._release_spy_lock(key)
                     cleaned += 1
             if all(sess.get(g) is None for g in _GAME_KEYS):
                 del self._sessions[key]
@@ -576,3 +1502,78 @@ class GroupGamesPlugin(Star):
         if rest == "放弃":
             return self._reply(event, self.give_up_song(key))
         return self._reply(event, self.do_song(key, self._sender_name(event), rest))
+
+    @filter.command("卧底", priority=200)
+    async def cmd_spy(self, event: AstrMessageEvent):
+        """谁是卧底：加入 / 开始 / 描述 / 投票 / 退出 / 结束"""
+        key = self._key_of(event)
+        rest = self._rest_of(event, "卧底")
+        sid, sname = self._sender_id(event), self._sender_name(event)
+        if not rest or rest == "状态":
+            return self._reply(event, self.spy_status(key))
+        if rest == "加入":
+            return self._reply(event, self.do_spy_join(key, sid, sname))
+        if rest == "开始":
+            return self._reply(event, self.start_spy(key))
+        if rest == "退出":
+            return self._reply(event, self.do_spy_quit(key, sid))
+        if rest == "结束":
+            return self._reply(event, self.end_spy(key))
+        m = re.match(r"^(描述|投票)\s*(.*)$", rest)
+        if m:
+            act, arg = m.group(1), m.group(2).strip()
+            if act == "描述":
+                return self._reply(event, self.do_spy_desc(key, sid, sname, arg))
+            return self._reply(event, self.do_spy_vote(key, sid, arg))
+        return self._reply(event, self.spy_status(key))
+
+    @filter.command("猜成语", priority=200)
+    async def cmd_idiom_quiz(self, event: AstrMessageEvent):
+        """猜成语：开始 / 抢答 / 放弃"""
+        key = self._key_of(event)
+        rest = self._rest_of(event, "猜成语")
+        if not rest:
+            return self._reply(event, self.start_idiom_quiz(key))
+        if rest == "放弃":
+            return self._reply(event, self.give_up_idiom_quiz(key))
+        return self._reply(
+            event,
+            self.do_idiom_quiz(
+                key, self._sender_id(event), self._sender_name(event), rest
+            ),
+        )
+
+    @filter.command("24点", priority=200)
+    async def cmd_24(self, event: AstrMessageEvent):
+        """24 点：开始 / 提交算式 / 放弃"""
+        key = self._key_of(event)
+        rest = self._rest_of(event, "24点")
+        if not rest:
+            return self._reply(event, self.start_24(key))
+        if rest == "放弃":
+            return self._reply(event, self.give_up_24(key))
+        return self._reply(
+            event,
+            self.do_24(key, self._sender_id(event), self._sender_name(event), rest),
+        )
+
+    @filter.command("猜价格", priority=200)
+    async def cmd_price(self, event: AstrMessageEvent):
+        """猜价格：开始 / 猜价 / 放弃"""
+        key = self._key_of(event)
+        rest = self._rest_of(event, "猜价格")
+        if not rest:
+            return self._reply(event, self.start_price(key))
+        if rest == "放弃":
+            return self._reply(event, self.give_up_price(key))
+        return self._reply(
+            event,
+            self.do_price(
+                key, self._sender_id(event), self._sender_name(event), rest
+            ),
+        )
+
+    @filter.command("积分", priority=200)
+    async def cmd_scores(self, event: AstrMessageEvent):
+        """查看积分排行榜"""
+        return self._reply(event, self.show_scores())

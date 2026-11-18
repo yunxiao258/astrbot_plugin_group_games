@@ -6,6 +6,7 @@
 猜歌（全等/模糊/提示/放弃）、群会话隔离、超时清理、随机 seed 固定。
 """
 import asyncio
+import os
 import random
 import sys
 import time
@@ -15,7 +16,7 @@ import unittest
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-sys.path.insert(0, r"D:\astrbot\data\plugins")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from astrbot_plugin_group_games.main import (  # noqa: E402
     GroupGamesPlugin,

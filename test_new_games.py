@@ -18,7 +18,7 @@ import unittest
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-sys.path.insert(0, r"D:\astrbot\data\plugins")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from astrbot_plugin_group_games.main import (  # noqa: E402
     GroupGamesPlugin,
@@ -673,6 +673,22 @@ class TestNewCommands(unittest.TestCase):
         p._add_score("u1", "张三", 6)
         r = asyncio.run(p.cmd_scores(FakeEvent("/积分")))
         self.assertIn("张三", r[0].text)
+
+    def test_v111_async_initialize_and_terminate(self):
+        self.assertTrue(asyncio.iscoroutinefunction(GroupGamesPlugin.initialize))
+        self.assertTrue(asyncio.iscoroutinefunction(GroupGamesPlugin.terminate))
+        p = make_plugin()
+
+        async def scenario():
+            await p.initialize()
+            t1 = p._cleanup_task
+            self.assertIsNotNone(t1)
+            await p.initialize()
+            self.assertIs(p._cleanup_task, t1)
+            await p.terminate()
+            self.assertIsNone(p._cleanup_task)
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

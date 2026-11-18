@@ -27,7 +27,7 @@ from astrbot.api.star import Context, Star, register
 PLUGIN_NAME = "astrbot_plugin_group_games"
 PLUGIN_AUTHOR = "云晓"
 PLUGIN_DESC = "群聊互动小游戏：猜数字/成语接龙/猜歌名"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.1"
 
 # ==================== 内置成语词库（四字成语，共 240 条） ====================
 IDIOMS: list[str] = [
@@ -1441,13 +1441,12 @@ class GroupGamesPlugin(Star):
                 logger.warning(f"【{PLUGIN_NAME}】清扫任务异常: {e}")
             await asyncio.sleep(self.sweep_interval)
 
-    @filter.on_astrbot_loaded()
-    async def _on_loaded(self):
-        """AstrBot 加载完成后启动后台清扫任务"""
-        self.initialize()
-
-    def initialize(self):
-        """插件热重载后启动后台清扫任务（on_astrbot_loaded 热重载不触发；幂等）"""
+    async def initialize(self):
+        """插件加载与热重载后启动后台清扫任务（幂等，需处于运行中事件循环）"""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
         if self._cleanup_task is None or self._cleanup_task.done():
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 

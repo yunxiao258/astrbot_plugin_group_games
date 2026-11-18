@@ -3,7 +3,7 @@
 群聊互动小游戏：**猜数字**、**成语接龙**、**猜歌名**、**谁是卧底**、**猜成语**、**24 点**、**猜价格**，并内置积分排行榜。大部分小游戏按群/会话隔离状态，互不干扰；谁是卧底采用全局单局锁（同时只允许一局进行）；游戏状态纯内存保存，超时自动清理；积分持久化到 JSON 文件（原子写）。
 
 - 插件名称：`astrbot_plugin_group_games`
-- 版本：1.1.0
+- 版本：1.1.1
 - 作者：云晓
 - 许可证：MIT（详见 LICENSE）
 
@@ -111,8 +111,8 @@
 仅依赖 Python 标准库与 AstrBot 自带组件。单元测试：
 
 ```bash
-D:\uv-tools\astrbot\Scripts\python.exe test_group_games.py
-D:\uv-tools\astrbot\Scripts\python.exe test_new_games.py
+python test_group_games.py
+python test_new_games.py
 ```
 
 测试覆盖：猜数字（大/小/中/放弃/非法输入/自定义范围）、成语接龙（长度/首尾字/词库/重复/结算）、猜歌（全等/模糊/提示/放弃）、谁是卧底状态机（加入/描述/投票/淘汰/胜负/全局单局锁/超时推进）、24 点表达式校验（合法/非法/注入攻击/除零/有解发牌）、猜成语防刷与得分、猜价格高低提示与冷却、积分 JSON 原子持久化、群会话隔离、超时清理、随机数固定（seed）。

@@ -32,7 +32,7 @@ try:
 except ImportError:
     from hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
 
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.2.1"
 
 # ==================== 内置成语词库（四字成语，共 240 条） ====================
 IDIOMS: list[str] = [
@@ -491,7 +491,14 @@ class GroupGamesPlugin(Star):
         except OSError as e:
             logger.warning(f"【{PLUGIN_NAME}】积分保存失败: {e}")
 
-    def _add_score(self, sender_id: str, name: str, points: int) -> int:
+    @staticmethod
+    def _extract_group_id(key: str) -> str:
+        s = str(key or "")
+        if ":GroupMessage:" in s:
+            return s.rsplit(":", 1)[-1]
+        return ""
+
+    def _add_score(self, sender_id: str, name: str, points: int, group_id: str = "") -> int:
         """为玩家增加积分并原子持久化，返回其累计总分"""
         points = self._safe_int(points, 0)
         if sender_id == "未知" or not sender_id:
@@ -502,7 +509,7 @@ class GroupGamesPlugin(Star):
             entry["name"] = name
         self._save_scores()
         if points > 0:
-            emit_hub_event(PLUGIN_NAME, "group_games.points_awarded", {"user_id": sender_id, "nickname": entry["name"], "delta": points, "total": entry["points"]}, self.context)
+            emit_hub_event(PLUGIN_NAME, "group_games.points_awarded", {"group_id": group_id, "user_id": sender_id, "nickname": entry["name"], "delta": points, "total": entry["points"]}, self.context)
         return entry["points"]
 
     def _release_spy_lock(self, key: str):
@@ -766,12 +773,12 @@ class GroupGamesPlugin(Star):
             lines.append("🎉 平民获胜！卧底已被揪出。")
             for pid, p in game["players"].items():
                 if p.get("alive"):
-                    self._add_score(pid, p["name"], 3)
+                    self._add_score(pid, p["name"], 3, group_id=self._extract_group_id(key))
         elif winner == "卧底":
             lines.append("🎉 卧底获胜！成功潜伏到最后。")
             for pid, p in game["players"].items():
                 if p.get("is_spy"):
-                    self._add_score(pid, p["name"], 5)
+                    self._add_score(pid, p["name"], 5, group_id=self._extract_group_id(key))
         else:
             lines.append(f"🏁 {winner}")
         spy_name = next(
@@ -1115,7 +1122,7 @@ class GroupGamesPlugin(Star):
             return f"⏳ 冷却中，请 {left} 秒后再试（防止刷屏）。"
         answer = game["quiz"]["answer"]
         if guess == answer:
-            total = self._add_score(sender_id, sender_name, 2)
+            total = self._add_score(sender_id, sender_name, 2, group_id=self._extract_group_id(key))
             sess[KEY_IDIOM_QUIZ] = None
             return (
                 f"🎉 恭喜 {sender_name} 答对！答案是「{answer}」。\n"
@@ -1318,7 +1325,7 @@ class GroupGamesPlugin(Star):
             game["last_activity"] = now
             return f"❌ {msg}"
         # 校验通过且结果精确等于 24：得分并结束
-        total = self._add_score(sender_id, sender_name, 3)
+        total = self._add_score(sender_id, sender_name, 3, group_id=self._extract_group_id(key))
         sess[KEY_24] = None
         return (
             f"🎉 恭喜 {sender_name} 算出 24！算式：{text.strip()}\n"
@@ -1377,7 +1384,7 @@ class GroupGamesPlugin(Star):
         game["last_activity"] = now
         price = game["item"]["price"]
         if guess == price:
-            total = self._add_score(sender_id, sender_name, 2)
+            total = self._add_score(sender_id, sender_name, 2, group_id=self._extract_group_id(key))
             name = game["item"]["name"]
             sess[KEY_PRICE] = None
             return (
@@ -1604,6 +1611,6 @@ class GroupGamesPlugin(Star):
             delta = self._safe_int(p.get("delta", 0), 0)
             if not uid or delta <= 0:
                 return {"ok": False, "error": "缺少有效 user_id / delta"}
-            total = self._add_score(uid, nick, delta)
+            total = self._add_score(uid, nick, delta, group_id=str(p.get("group_id", "")))
             return {"ok": True, "data": {"user_id": uid, "total": total}}
         return {"ok": False, "error": f"不支持的动作：{action}"}

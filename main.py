@@ -27,7 +27,12 @@ from astrbot.api.star import Context, Star, register
 PLUGIN_NAME = "astrbot_plugin_group_games"
 PLUGIN_AUTHOR = "云晓"
 PLUGIN_DESC = "群聊互动小游戏：猜数字/成语接龙/猜歌名"
-PLUGIN_VERSION = "1.1.1"
+try:
+    from .hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
+except ImportError:
+    from hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
+
+PLUGIN_VERSION = "1.2.0"
 
 # ==================== 内置成语词库（四字成语，共 240 条） ====================
 IDIOMS: list[str] = [
@@ -311,6 +316,7 @@ _GAME_KEYS = (KEY_GUESS, KEY_CHAIN, KEY_SONG, KEY_SPY, KEY_IDIOM_QUIZ, KEY_24, K
 
 @register(PLUGIN_NAME, PLUGIN_AUTHOR, PLUGIN_DESC, PLUGIN_VERSION)
 class GroupGamesPlugin(Star):
+    HUB_PROTOCOL_VERSION = HUB_PROTOCOL_VERSION
     """群聊互动小游戏：猜数字 / 成语接龙 / 猜歌名"""
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -495,6 +501,8 @@ class GroupGamesPlugin(Star):
         if name:
             entry["name"] = name
         self._save_scores()
+        if points > 0:
+            emit_hub_event(PLUGIN_NAME, "group_games.points_awarded", {"user_id": sender_id, "nickname": entry["name"], "delta": points, "total": entry["points"]}, self.context)
         return entry["points"]
 
     def _release_spy_lock(self, key: str):
@@ -1576,3 +1584,26 @@ class GroupGamesPlugin(Star):
     async def cmd_scores(self, event: AstrMessageEvent):
         """查看积分排行榜"""
         return self._reply(event, self.show_scores())
+
+    def hub_status(self) -> dict:
+        return {
+            "version": PLUGIN_VERSION,
+            "status": "online",
+            "metrics": {"积分玩家": len(self._scores), "进行中局数": len(self._sessions)},
+            "actions": ["get_leaderboard", "add_points"],
+        }
+
+    async def hub_action(self, action: str, params: dict | None = None) -> dict:
+        p = params or {}
+        if action == "get_leaderboard":
+            ranked = sorted(self._scores.items(), key=lambda kv: -int(kv[1].get("points", 0)))[:15]
+            return {"ok": True, "data": [{"user_id": k, "nickname": v.get("name", k), "points": v.get("points", 0)} for k, v in ranked]}
+        if action == "add_points":
+            uid = str(p.get("user_id", "")).strip()
+            nick = str(p.get("nickname", uid))
+            delta = self._safe_int(p.get("delta", 0), 0)
+            if not uid or delta <= 0:
+                return {"ok": False, "error": "缺少有效 user_id / delta"}
+            total = self._add_score(uid, nick, delta)
+            return {"ok": True, "data": {"user_id": uid, "total": total}}
+        return {"ok": False, "error": f"不支持的动作：{action}"}
